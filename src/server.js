@@ -8,3 +8,4 @@ app.listen(PORT, () => {
   console.log(`🚀 Servidor de Portal 360 corriendo en http://localhost:${PORT}`);
   console.log(`Verifica el estado en http://localhost:${PORT}/api/health`);
 });
+

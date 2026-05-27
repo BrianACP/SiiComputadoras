@@ -47,22 +47,42 @@ const guardarRespuesta = async (req, res) => {
     }
 };
 
-// --- NUEVA FUNCIÓN AGREGADA ---
 const actualizarConfiguracion = async (req, res) => {
     const { tipo } = req.params;
     const { preguntas } = req.body;
+    const id = tipo.toUpperCase();
 
     try {
-        const { error } = await supabase
+        const { data, error } = await supabase
             .from('configuracion_encuestas')
-            .update({ preguntas: preguntas, updated_at: new Date() })
-            .eq('id', tipo.toUpperCase());
+            .upsert(
+                { id, preguntas, updated_at: new Date().toISOString() },
+                { onConflict: 'id' }
+            )
+            .select();
 
-        if (error) throw error;
+        if (error) {
+            console.error('Error Supabase al guardar configuración:', error);
+            return res.status(500).json({
+                exito: false,
+                mensaje: 'Error al actualizar configuración',
+                error: error.message,
+            });
+        }
 
-        res.status(200).json({ exito: true, mensaje: '¡Preguntas actualizadas con éxito!' });
+        const registro = data?.[0];
+        return res.status(200).json({
+            exito: true,
+            mensaje: '¡Preguntas actualizadas con éxito!',
+            preguntas: registro?.preguntas ?? preguntas,
+            data,
+        });
     } catch (error) {
-        res.status(500).json({ exito: false, mensaje: 'Error al actualizar configuración', error: error.message });
+        return res.status(500).json({
+            exito: false,
+            mensaje: 'Error al actualizar configuración',
+            error: error.message,
+        });
     }
 };
 
