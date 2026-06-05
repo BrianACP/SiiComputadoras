@@ -86,6 +86,20 @@ const eliminarEmpleado = async (req, res) => {
   const { id } = req.params;
 
   try {
+    const { count, error: countError } = await supabase
+      .from('servicios')
+      .select('*', { count: 'exact', head: true })
+      .eq('tecnico_id', id);
+
+    if (countError) throw new Error(countError.message);
+
+    if (count > 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'No se puede eliminar: el empleado tiene servicios registrados en el sistema'
+      });
+    }
+
     const { data, error } = await supabase
       .from('empleados')
       .delete()
@@ -94,7 +108,6 @@ const eliminarEmpleado = async (req, res) => {
 
     if (error) throw new Error(error.message);
 
-    // Si Supabase no encontró ningún registro con ese id, data estará vacío
     if (!data || data.length === 0) {
       return res.status(404).json({
         éxito: false,
