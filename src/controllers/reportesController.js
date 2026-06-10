@@ -1,5 +1,35 @@
 const supabase = require('../config/supabaseClient');
 
+// Helper: parsea respuestas (string o array) y devuelve promedio de calificaciones
+const calcularPromedio = (respuestas) => {
+  try {
+    const arr = typeof respuestas === 'string'
+      ? JSON.parse(respuestas)
+      : respuestas;
+    if (!Array.isArray(arr)) return null;
+    const calificaciones = arr
+      .filter(r => r.tipo === 'calificacion' && r.calificacion !== null)
+      .map(r => Number(r.calificacion));
+    if (calificaciones.length === 0) return null;
+    return calificaciones.reduce((a, b) => a + b, 0) / calificaciones.length;
+  } catch (e) {
+    return null;
+  }
+};
+
+// Helper: construye rango de fechas ISO para filtros de Supabase
+// Convierte desde='YYYY-MM-DD' a inicio del dia y hasta='YYYY-MM-DD' a final del dia
+// Esto evita que hasta='YYYY-MM-DD' excluya registros de ese dia
+const construirFiltroFechas = (desde, hasta) => {
+  const fechaDesde = desde
+    ? new Date(desde + 'T00:00:00.000Z').toISOString()
+    : new Date('2000-01-01').toISOString();
+  const fechaHasta = hasta
+    ? new Date(hasta + 'T23:59:59.999Z').toISOString()
+    : new Date().toISOString();
+  return { fechaDesde, fechaHasta };
+};
+
 /**
  * FUNCION 1: obtenerResumen
  * Obtiene un resumen general de encuestas y servicios en un periodo.
@@ -7,43 +37,34 @@ const supabase = require('../config/supabaseClient');
 const obtenerResumen = async (req, res) => {
   const { desde, hasta } = req.query;
   try {
-    let queryFeedback = supabase.from('feedback_clientes').select('respuestas, alerta_activa, respondido_at');
-    let queryServicios = supabase.from('servicios').select('id', { count: 'exact', head: true });
+    const { fechaDesde, fechaHasta } = construirFiltroFechas(desde, hasta);
 
-    if (desde) {
-      queryFeedback = queryFeedback.gte('respondido_at', desde);
-      queryServicios = queryServicios.gte('created_at', desde);
-    }
-    if (hasta) {
-      queryFeedback = queryFeedback.lte('respondido_at', hasta);
-      queryServicios = queryServicios.lte('created_at', hasta);
-    }
-
-    const { data: feedbacks, error: errorFeedback } = await queryFeedback;
-    const { count: total_servicios, error: errorServicios } = await queryServicios;
+    const { data: feedbacks, error: errorFeedback } = await supabase
+      .from('feedback_clientes')
+      .select('*')
+      .gte('respondido_at', fechaDesde)
+      .lte('respondido_at', fechaHasta);
 
     if (errorFeedback) throw errorFeedback;
+
+    const { count: total_servicios, error: errorServicios } = await supabase
+      .from('servicios')
+      .select('id', { count: 'exact', head: true })
+      .gte('created_at', fechaDesde)
+      .lte('created_at', fechaHasta);
+
     if (errorServicios) throw errorServicios;
 
     const total_respondidas = feedbacks.length;
-    let sumaCalificaciones = 0;
-    let totalCalificaciones = 0;
-    let total_alertas = 0;
+    const total_alertas = feedbacks.filter(f => f.alerta_activa).length;
 
-    feedbacks.forEach(f => {
-      if (f.alerta_activa) total_alertas++;
-      
-      const calificaciones = f.respuestas
-        .filter(r => r.tipo === 'calificacion' && r.calificacion !== null)
-        .map(r => r.calificacion);
-      
-      calificaciones.forEach(c => {
-        sumaCalificaciones += c;
-        totalCalificaciones++;
-      });
-    });
+    const promedios = feedbacks
+      .map(f => calcularPromedio(f.respuestas))
+      .filter(p => p !== null);
 
-    const promedio_general = totalCalificaciones > 0 ? sumaCalificaciones / totalCalificaciones : 0;
+    const promedio_general = promedios.length > 0
+      ? promedios.reduce((a, b) => a + b, 0) / promedios.length
+      : 0;
 
     res.status(200).json({
       success: true,
@@ -61,51 +82,65 @@ const obtenerResumen = async (req, res) => {
 
 /**
  * FUNCION 2: obtenerPorTecnico
- * Metricas de desempeño por cada tecnico.
+ * Metricas de desempenio por cada tecnico.
+ * Usa 3 consultas separadas y une en JavaScript para evitar problemas de JOIN anidado.
  */
 const obtenerPorTecnico = async (req, res) => {
   const { desde, hasta } = req.query;
   try {
-    let query = supabase
+    const { fechaDesde, fechaHasta } = construirFiltroFechas(desde, hasta);
+
+    // a) Todos los feedbacks del periodo
+    const { data: feedbacks, error: errorFeedback } = await supabase
       .from('feedback_clientes')
-      .select(`
-        respuestas,
-        servicios (
-          tecnico_id,
-          empleados (nombre)
-        )
-      `);
+      .select('respuestas, servicio_id, respondido_at')
+      .gte('respondido_at', fechaDesde)
+      .lte('respondido_at', fechaHasta);
 
-    if (desde) query = query.gte('respondido_at', desde);
-    if (hasta) query = query.lte('respondido_at', hasta);
+    if (errorFeedback) throw errorFeedback;
 
-    const { data, error } = await query;
-    if (error) throw error;
+    // b) Todos los servicios (para obtener tecnico_id)
+    const { data: servicios, error: errorServicios } = await supabase
+      .from('servicios')
+      .select('id, tecnico_id');
+
+    if (errorServicios) throw errorServicios;
+
+    // c) Todos los empleados
+    const { data: empleados, error: errorEmpleados } = await supabase
+      .from('empleados')
+      .select('id, nombre');
+
+    if (errorEmpleados) throw errorEmpleados;
+
+    const servicioMap = {};
+    (servicios || []).forEach(s => { servicioMap[s.id] = s; });
+
+    const empleadoMap = {};
+    (empleados || []).forEach(e => { empleadoMap[e.id] = e; });
 
     const tecnicosMap = {};
 
-    data.forEach(item => {
-      const tecnico = item.servicios?.empleados;
-      const tecnicoId = item.servicios?.tecnico_id;
-      
-      if (!tecnicoId || !tecnico) return;
+    (feedbacks || []).forEach(f => {
+      const servicio = servicioMap[f.servicio_id];
+      if (!servicio) return;
+
+      const tecnicoId = servicio.tecnico_id;
+      if (!tecnicoId) return;
+
+      const empleado = empleadoMap[tecnicoId];
+      const nombreTecnico = empleado ? empleado.nombre : 'Desconocido';
 
       if (!tecnicosMap[tecnicoId]) {
         tecnicosMap[tecnicoId] = {
-          nombre: tecnico.nombre,
+          nombre: nombreTecnico,
           total_evaluaciones: 0,
           sumaPromedios: 0,
           conteoPromedios: 0
         };
       }
 
-      const calificaciones = item.respuestas
-        .filter(r => r.tipo === 'calificacion' && r.calificacion !== null)
-        .map(r => r.calificacion);
-      
-      const promedioEncuesta = calificaciones.length > 0
-        ? calificaciones.reduce((a, b) => a + b, 0) / calificaciones.length
-        : null;
+      const promedioEncuesta = calcularPromedio(f.respuestas);
 
       tecnicosMap[tecnicoId].total_evaluaciones++;
       if (promedioEncuesta !== null) {
@@ -120,7 +155,7 @@ const obtenerPorTecnico = async (req, res) => {
       promedio: t.conteoPromedios > 0 ? t.sumaPromedios / t.conteoPromedios : 0
     }));
 
-    resultado.sort((a, b) => a.promedio - b.promedio);
+    resultado.sort((a, b) => b.promedio - a.promedio);
 
     res.status(200).json({ success: true, data: resultado });
   } catch (error) {
@@ -130,45 +165,37 @@ const obtenerPorTecnico = async (req, res) => {
 
 /**
  * FUNCION 3: obtenerTendencia
- * Promedio de calificaciones agrupado por semana.
+ * Promedio de calificaciones agrupado por fecha (YYYY-MM-DD).
  */
 const obtenerTendencia = async (req, res) => {
   const { desde, hasta } = req.query;
   try {
-    let query = supabase.from('feedback_clientes').select('respuestas, respondido_at');
-    if (desde) query = query.gte('respondido_at', desde);
-    if (hasta) query = query.lte('respondido_at', hasta);
+    const { fechaDesde, fechaHasta } = construirFiltroFechas(desde, hasta);
 
-    const { data, error } = await query;
+    const { data, error } = await supabase
+      .from('feedback_clientes')
+      .select('respuestas, respondido_at')
+      .gte('respondido_at', fechaDesde)
+      .lte('respondido_at', fechaHasta);
+
     if (error) throw error;
 
     const semanasMap = {};
 
-    data.forEach(f => {
-      const fecha = new Date(f.respondido_at);
-      // Obtener numero de semana aproximado (YYYY-WW)
-      const year = fecha.getFullYear();
-      const firstDayOfYear = new Date(year, 0, 1);
-      const pastDaysOfYear = (fecha - firstDayOfYear) / 86400000;
-      const weekNumber = Math.ceil((pastDaysOfYear + firstDayOfYear.getDay() + 1) / 7);
-      const semanaKey = `${year}-${weekNumber.toString().padStart(2, '0')}`;
+    (data || []).forEach(f => {
+      // Usar fecha simple YYYY-MM-DD para evitar problemas de formato
+      const semana = new Date(f.respondido_at).toISOString().slice(0, 10);
 
-      if (!semanasMap[semanaKey]) {
-        semanasMap[semanaKey] = { semana: semanaKey, sumaPromedios: 0, conteo: 0, total: 0 };
+      if (!semanasMap[semana]) {
+        semanasMap[semana] = { semana, sumaPromedios: 0, conteo: 0, total: 0 };
       }
 
-      const calificaciones = f.respuestas
-        .filter(r => r.tipo === 'calificacion' && r.calificacion !== null)
-        .map(r => r.calificacion);
-      
-      const promedio = calificaciones.length > 0
-        ? calificaciones.reduce((a, b) => a + b, 0) / calificaciones.length
-        : null;
+      const promedio = calcularPromedio(f.respuestas);
 
-      semanasMap[semanaKey].total++;
+      semanasMap[semana].total++;
       if (promedio !== null) {
-        semanasMap[semanaKey].sumaPromedios += promedio;
-        semanasMap[semanaKey].conteo++;
+        semanasMap[semana].sumaPromedios += promedio;
+        semanasMap[semana].conteo++;
       }
     });
 
@@ -178,6 +205,7 @@ const obtenerTendencia = async (req, res) => {
       total: s.total
     }));
 
+    // Ordenar por fecha ascendente
     resultado.sort((a, b) => a.semana.localeCompare(b.semana));
 
     res.status(200).json({ success: true, data: resultado });
@@ -230,32 +258,50 @@ const obtenerDetalleTecnico = async (req, res) => {
 /**
  * FUNCION 5: obtenerAlertas
  * Obtiene todas las encuestas con alerta_activa = true.
+ * Usa 3 consultas separadas y une en JavaScript.
  */
 const obtenerAlertas = async (req, res) => {
   try {
-    const { data, error } = await supabase
+    // a) Feedbacks con alerta activa (sin pedir folio ni cliente, no existen aqui)
+    const { data: feedbacks, error: errorFeedbacks } = await supabase
       .from('feedback_clientes')
-      .select(`
-        *,
-        servicios (
-          folio,
-          cliente,
-          empleados (nombre)
-        )
-      `)
+      .select('id, servicio_id, respondido_at, respuestas, alerta_activa, nota_resolucion')
       .eq('alerta_activa', true)
       .order('respondido_at', { ascending: false });
 
-    if (error) throw error;
+    if (errorFeedbacks) throw errorFeedbacks;
 
-    const resultado = data.map(f => ({
-      ...f,
-      folio: f.servicios?.folio,
-      cliente: f.servicios?.cliente,
-      nombre_tecnico: f.servicios?.empleados?.nombre
-    }));
+    // b) Servicios para obtener folio, cliente y tecnico_id
+    const { data: servicios, error: errorServicios } = await supabase
+      .from('servicios')
+      .select('id, folio, cliente, tecnico_id');
 
-    res.status(200).json({ success: true, data: resultado });
+    if (errorServicios) throw errorServicios;
+
+    // c) Empleados para obtener nombre del tecnico
+    const { data: empleados, error: errorEmpleados } = await supabase
+      .from('empleados')
+      .select('id, nombre');
+
+    if (errorEmpleados) throw errorEmpleados;
+
+    const alertas = (feedbacks || []).map(f => {
+      const servicio = (servicios || []).find(s => s.id === f.servicio_id) || {};
+      const empleado = (empleados || []).find(e => e.id === servicio.tecnico_id) || {};
+
+      return {
+        id: f.id,
+        respondido_at: f.respondido_at,
+        respuestas: f.respuestas,
+        alerta_activa: f.alerta_activa,
+        nota_resolucion: f.nota_resolucion,
+        folio: servicio.folio || 'Sin folio',
+        cliente: servicio.cliente || 'Sin cliente',
+        nombre_tecnico: empleado.nombre || 'Sin tecnico'
+      };
+    });
+
+    res.status(200).json({ success: true, data: alertas });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Error al obtener alertas', error: error.message });
   }
