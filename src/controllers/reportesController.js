@@ -113,46 +113,40 @@ const obtenerPorTecnico = async (req, res) => {
 
     if (errorEmpleados) throw errorEmpleados;
 
-    const servicioMap = {};
-    (servicios || []).forEach(s => { servicioMap[s.id] = s; });
-
-    const empleadoMap = {};
-    (empleados || []).forEach(e => { empleadoMap[e.id] = e; });
-
-    const tecnicosMap = {};
+    // Agrupar feedbacks por tecnico_id
+    const grupos = {};
 
     (feedbacks || []).forEach(f => {
-      const servicio = servicioMap[f.servicio_id];
+      const servicio = (servicios || []).find(s => s.id === f.servicio_id);
       if (!servicio) return;
 
-      const tecnicoId = servicio.tecnico_id;
-      if (!tecnicoId) return;
+      const tid = servicio.tecnico_id;
+      if (!tid) return;
 
-      const empleado = empleadoMap[tecnicoId];
-      const nombreTecnico = empleado ? empleado.nombre : 'Desconocido';
-
-      if (!tecnicosMap[tecnicoId]) {
-        tecnicosMap[tecnicoId] = {
-          nombre: nombreTecnico,
-          total_evaluaciones: 0,
-          sumaPromedios: 0,
-          conteoPromedios: 0
+      if (!grupos[tid]) {
+        const empleado = (empleados || []).find(e => e.id === tid);
+        grupos[tid] = {
+          tecnico_id: tid,
+          nombre: empleado?.nombre || 'Sin nombre',
+          calificaciones: [],
+          total_evaluaciones: 0
         };
       }
 
-      const promedioEncuesta = calcularPromedio(f.respuestas);
-
-      tecnicosMap[tecnicoId].total_evaluaciones++;
-      if (promedioEncuesta !== null) {
-        tecnicosMap[tecnicoId].sumaPromedios += promedioEncuesta;
-        tecnicosMap[tecnicoId].conteoPromedios++;
+      const promedio = calcularPromedio(f.respuestas);
+      if (promedio !== null) {
+        grupos[tid].calificaciones.push(promedio);
       }
+      grupos[tid].total_evaluaciones++;
     });
 
-    const resultado = Object.values(tecnicosMap).map(t => ({
-      nombre: t.nombre,
-      total_evaluaciones: t.total_evaluaciones,
-      promedio: t.conteoPromedios > 0 ? t.sumaPromedios / t.conteoPromedios : 0
+    const resultado = Object.values(grupos).map(g => ({
+      tecnico_id: g.tecnico_id,
+      nombre: g.nombre,
+      total_evaluaciones: g.total_evaluaciones,
+      promedio: g.calificaciones.length > 0
+        ? g.calificaciones.reduce((a, b) => a + b, 0) / g.calificaciones.length
+        : 0
     }));
 
     resultado.sort((a, b) => b.promedio - a.promedio);

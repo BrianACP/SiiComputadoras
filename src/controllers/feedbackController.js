@@ -41,6 +41,17 @@ const guardarRespuesta = async (req, res) => {
             }
             throw errorFeedback;
         }
+
+        // --- ACTUALIZAR ESTATUS DEL SERVICIO A "completado" ---
+        const { error: errorEstatus } = await supabase
+            .from('servicios')
+            .update({ estatus: 'completado' })
+            .eq('id', servicio.id);
+
+        if (errorEstatus) {
+            console.error('Error al actualizar estatus del servicio:', errorEstatus);
+        }
+
         res.status(201).json({ exito: true, mensaje: '¡Encuesta guardada con éxito!' });
     } catch (error) {
         res.status(500).json({ exito: false, mensaje: 'Error interno al procesar', error: error.message });
@@ -187,6 +198,17 @@ const enviarEncuesta = async (req, res) => {
 
     if (errorInsert) {
       return res.status(500).json({ success: false, message: 'Error al registrar encuesta' });
+    }
+
+    // --- ACTUALIZAR ESTATUS DEL SERVICIO A "completado" ---
+    const { error: errorEstatus } = await supabase
+      .from('servicios')
+      .update({ estatus: 'completado' })
+      .eq('id', servicio.id);
+
+    if (errorEstatus) {
+      console.error('Error al actualizar estatus del servicio:', errorEstatus);
+      // El feedback ya se guardó, así que respondemos éxito pero con advertencia
     }
 
     res.status(201).json({ success: true, message: 'Encuesta registrada correctamente' });
