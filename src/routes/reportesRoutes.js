@@ -2,9 +2,11 @@ const express = require('express');
 const router = express.Router();
 const reportesController = require('../controllers/reportesController');
 const verificarToken = require('../middlewares/authMiddleware');
+const authMiddleware = require('../middlewares/authMiddleware');
 
 // Todas las rutas de reportes requieren un token valido
 router.use(verificarToken);
+router.use(authMiddleware);
 
 router.get('/', reportesController.obtenerResumen);
 router.get('/por-tecnico', reportesController.obtenerPorTecnico);

@@ -316,7 +316,7 @@ const guardarNotaResolucion = async (req, res) => {
   try {
     const { error } = await supabase
       .from('feedback_clientes')
-      .update({ nota_resolucion })
+      .update({ nota_resolucion, alerta_activa: false })
       .eq('id', feedback_id);
 
     if (error) throw error;
