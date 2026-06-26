@@ -53,23 +53,62 @@ const extraerComentario = (respuestas) => {
 
 const obtenerKPIs = async (req, res) => {
     try {
-        // 1. Total de servicios
-        const { count: totalServicios, error: errServicios } = await supabase
+        const { fechaDesde: fechaDesdeQuery, fechaHasta: fechaHastaQuery } = req.query;
+        const fechaHastaBase = fechaHastaQuery
+            ? new Date(`${fechaHastaQuery}T00:00:00.000Z`)
+            : new Date();
+        const fechaDesdeBase = fechaDesdeQuery
+            ? new Date(`${fechaDesdeQuery}T00:00:00.000Z`)
+            : new Date(fechaHastaBase);
+
+        if (!fechaDesdeQuery) {
+            fechaDesdeBase.setUTCDate(fechaDesdeBase.getUTCDate() - 29);
+        }
+
+        if (Number.isNaN(fechaDesdeBase.getTime()) || Number.isNaN(fechaHastaBase.getTime())) {
+            return res.status(400).json({ exito: false, mensaje: 'Las fechas deben tener formato YYYY-MM-DD' });
+        }
+
+        if (fechaDesdeBase > fechaHastaBase) {
+            return res.status(400).json({ exito: false, mensaje: 'fechaDesde no puede ser mayor que fechaHasta' });
+        }
+
+        const fechaDesde = new Date(`${fechaDesdeBase.toISOString().slice(0, 10)}T00:00:00.000Z`).toISOString();
+        const fechaHasta = new Date(`${fechaHastaBase.toISOString().slice(0, 10)}T23:59:59.999Z`).toISOString();
+
+        // 1. Servicios creados en el periodo
+        const { data: serviciosPeriodo, error: errServicios } = await supabase
             .from('servicios')
-            .select('*', { count: 'exact', head: true });
+            .select('id')
+            .gte('created_at', fechaDesde)
+            .lte('created_at', fechaHasta);
 
         if (errServicios) throw errServicios;
 
-        // 2. Todos los feedbacks para calcular metricas
-        const { data: feedbacks, error: errFeedback } = await supabase
-            .from('feedback_clientes')
-            .select('id, respondido_at, respuestas, alerta_activa');
+        const servicioIdsPeriodo = (serviciosPeriodo || []).map(servicio => servicio.id);
+        const totalServicios = servicioIdsPeriodo.length;
 
-        if (errFeedback) throw errFeedback;
+        // 2. Feedbacks de servicios creados en el periodo
+        let feedbacks = [];
+        if (servicioIdsPeriodo.length > 0) {
+            const { data: feedbacksData, error: errFeedback } = await supabase
+                .from('feedback_clientes')
+                .select('id, servicio_id, respondido_at, respuestas')
+                .in('servicio_id', servicioIdsPeriodo)
+                .not('respondido_at', 'is', null);
+
+            if (errFeedback) throw errFeedback;
+            feedbacks = feedbacksData || [];
+        }
 
         // 3. Calculos en JavaScript
-        const respondidas = feedbacks?.length || 0;
-        const pendientes = (totalServicios || 0) - respondidas;
+        const serviciosRespondidos = new Set(
+            feedbacks
+                .map(feedback => feedback.servicio_id)
+                .filter(Boolean)
+        );
+        const respondidas = serviciosRespondidos.size;
+        const pendientes = Math.max(totalServicios - respondidas, 0);
 
         const todasCalificaciones = (feedbacks || []).flatMap(f => {
             try {
@@ -126,7 +165,7 @@ const obtenerKPIs = async (req, res) => {
             kpis: {
                 enviadas: totalServicios || 0,
                 respondidas,
-                pendientes: pendientes < 0 ? 0 : pendientes,
+                pendientes,
                 promedio
             },
             recientes: recientesConFolio

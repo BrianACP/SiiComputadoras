@@ -30,6 +30,8 @@ const construirFiltroFechas = (desde, hasta) => {
   return { fechaDesde, fechaHasta };
 };
 
+const esFechaValida = (fecha) => !Number.isNaN(new Date(fecha).getTime());
+
 /**
  * FUNCION 1: obtenerResumen
  * Obtiene un resumen general de encuestas y servicios en un periodo.
@@ -39,26 +41,51 @@ const obtenerResumen = async (req, res) => {
   try {
     const { fechaDesde, fechaHasta } = construirFiltroFechas(desde, hasta);
 
-    const { data: feedbacks, error: errorFeedback } = await supabase
-      .from('feedback_clientes')
-      .select('*')
-      .gte('respondido_at', fechaDesde)
-      .lte('respondido_at', fechaHasta);
-
-    if (errorFeedback) throw errorFeedback;
-
-    const { count: total_servicios, error: errorServicios } = await supabase
+    const { data: serviciosPeriodo, error: errorServicios } = await supabase
       .from('servicios')
-      .select('id', { count: 'exact', head: true })
+      .select('id')
       .gte('created_at', fechaDesde)
       .lte('created_at', fechaHasta);
 
     if (errorServicios) throw errorServicios;
 
-    const total_respondidas = feedbacks.length;
-    const total_alertas = feedbacks.filter(f => f.alerta_activa).length;
+    const serviciosIdsPeriodo = (serviciosPeriodo || []).map(servicio => servicio.id);
+    const total_servicios = serviciosIdsPeriodo.length;
 
-    const promedios = feedbacks
+    if (total_servicios === 0) {
+      return res.status(200).json({
+        success: true,
+        data: {
+          total_respondidas: 0,
+          participacion: 0,
+          promedio_general: 0,
+          total_alertas: 0,
+          total_servicios: 0
+        }
+      });
+    }
+
+    const { data: feedbacks, error: errorFeedback } = await supabase
+      .from('feedback_clientes')
+      .select('servicio_id, respondido_at, respuestas, alerta_activa')
+      .in('servicio_id', serviciosIdsPeriodo);
+
+    if (errorFeedback) throw errorFeedback;
+
+    const serviciosRespondidosUnicos = new Set(
+      (feedbacks || [])
+        .filter(f => f.respondido_at)
+        .map(f => f.servicio_id)
+        .filter(Boolean)
+    );
+
+    const total_respondidas = serviciosRespondidosUnicos.size;
+    const total_alertas = (feedbacks || []).filter(f => f.alerta_activa).length;
+    const participacion = total_servicios > 0
+      ? Math.min(Number(((total_respondidas / total_servicios) * 100).toFixed(1)), 100)
+      : 0;
+
+    const promedios = (feedbacks || [])
       .map(f => calcularPromedio(f.respuestas))
       .filter(p => p !== null);
 
@@ -70,6 +97,7 @@ const obtenerResumen = async (req, res) => {
       success: true,
       data: {
         total_respondidas,
+        participacion,
         promedio_general,
         total_alertas,
         total_servicios: total_servicios || 0
@@ -166,19 +194,40 @@ const obtenerTendencia = async (req, res) => {
   try {
     const { fechaDesde, fechaHasta } = construirFiltroFechas(desde, hasta);
 
-    const { data, error } = await supabase
-      .from('feedback_clientes')
-      .select('respuestas, respondido_at')
-      .gte('respondido_at', fechaDesde)
-      .lte('respondido_at', fechaHasta);
+    const { data: serviciosPeriodo, error: errorServicios } = await supabase
+      .from('servicios')
+      .select('id, created_at')
+      .gte('created_at', fechaDesde)
+      .lte('created_at', fechaHasta);
 
-    if (error) throw error;
+    if (errorServicios) throw errorServicios;
+
+    const servicios = serviciosPeriodo || [];
+    if (servicios.length === 0) {
+      return res.status(200).json({ success: true, data: [] });
+    }
+
+    const serviciosIds = servicios.map(servicio => servicio.id);
+    const serviciosPorId = servicios.reduce((acc, servicio) => {
+      acc[servicio.id] = servicio;
+      return acc;
+    }, {});
+
+    const { data: feedbacks, error: errorFeedback } = await supabase
+      .from('feedback_clientes')
+      .select('servicio_id, respuestas')
+      .in('servicio_id', serviciosIds);
+
+    if (errorFeedback) throw errorFeedback;
 
     const semanasMap = {};
 
-    (data || []).forEach(f => {
+    (feedbacks || []).forEach(f => {
+      const servicio = serviciosPorId[f.servicio_id];
+      if (!servicio?.created_at) return;
+
       // Usar fecha simple YYYY-MM-DD para evitar problemas de formato
-      const semana = new Date(f.respondido_at).toISOString().slice(0, 10);
+      const semana = new Date(servicio.created_at).toISOString().slice(0, 10);
 
       if (!semanasMap[semana]) {
         semanasMap[semana] = { semana, sumaPromedios: 0, conteo: 0, total: 0 };
@@ -209,7 +258,108 @@ const obtenerTendencia = async (req, res) => {
 };
 
 /**
- * FUNCION 4: obtenerDetalleTecnico
+ * FUNCION 4: getDistribucion
+ * Distribucion de encuestas por nivel de satisfaccion.
+ */
+const getDistribucion = async (req, res) => {
+  const { fechaDesde: fechaDesdeQuery, fechaHasta: fechaHastaQuery } = req.query;
+
+  const fechaHastaBase = fechaHastaQuery
+    ? new Date(`${fechaHastaQuery}T00:00:00.000Z`)
+    : new Date();
+  const fechaDesdeBase = fechaDesdeQuery
+    ? new Date(`${fechaDesdeQuery}T00:00:00.000Z`)
+    : new Date(fechaHastaBase);
+
+  if (!fechaDesdeQuery) {
+    fechaDesdeBase.setUTCDate(fechaDesdeBase.getUTCDate() - 29);
+  }
+
+  if (!esFechaValida(fechaDesdeBase) || !esFechaValida(fechaHastaBase)) {
+    return res.status(400).json({
+      success: false,
+      message: 'Las fechas deben tener formato YYYY-MM-DD'
+    });
+  }
+
+  if (fechaDesdeBase > fechaHastaBase) {
+    return res.status(400).json({
+      success: false,
+      message: 'fechaDesde no puede ser mayor que fechaHasta'
+    });
+  }
+
+  try {
+    const { fechaDesde, fechaHasta } = construirFiltroFechas(
+      fechaDesdeBase.toISOString().slice(0, 10),
+      fechaHastaBase.toISOString().slice(0, 10)
+    );
+
+    const { data: serviciosPeriodo, error: errorServicios } = await supabase
+      .from('servicios')
+      .select('id')
+      .gte('created_at', fechaDesde)
+      .lte('created_at', fechaHasta);
+
+    if (errorServicios) throw errorServicios;
+
+    const serviciosIds = (serviciosPeriodo || []).map(servicio => servicio.id);
+    if (serviciosIds.length === 0) {
+      return res.status(200).json({
+        success: true,
+        data: { excelente: 0, bueno: 0, regular: 0, malo: 0, total: 0 }
+      });
+    }
+
+    const { data, error } = await supabase
+      .from('feedback_clientes')
+      .select('id, respuestas')
+      .in('servicio_id', serviciosIds)
+      .not('respondido_at', 'is', null)
+      ;
+
+    if (error) throw error;
+
+    const distribucion = {
+      excelente: 0,
+      bueno: 0,
+      regular: 0,
+      malo: 0,
+      total: 0
+    };
+
+    (data || []).forEach((feedback) => {
+      const respuestas = Array.isArray(feedback.respuestas) ? feedback.respuestas : [];
+      const calificaciones = respuestas
+        .filter((item) => item.tipo === 'calificacion' && item.calificacion !== null)
+        .map((item) => Number(item.calificacion))
+        .filter((valor) => Number.isFinite(valor));
+
+      if (calificaciones.length === 0) return;
+
+      const promedio = calificaciones.reduce((acumulado, valor) => acumulado + valor, 0) / calificaciones.length;
+
+      if (promedio >= 4.5) {
+        distribucion.excelente++;
+      } else if (promedio >= 3.5) {
+        distribucion.bueno++;
+      } else if (promedio >= 2.5) {
+        distribucion.regular++;
+      } else {
+        distribucion.malo++;
+      }
+
+      distribucion.total++;
+    });
+
+    res.status(200).json({ success: true, data: distribucion });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Error al obtener distribucion', error: error.message });
+  }
+};
+
+/**
+ * FUNCION 5: obtenerDetalleTecnico
  * Todas las encuestas de un tecnico especifico.
  */
 const obtenerDetalleTecnico = async (req, res) => {
@@ -250,17 +400,52 @@ const obtenerDetalleTecnico = async (req, res) => {
 };
 
 /**
- * FUNCION 5: obtenerAlertas
+ * FUNCION 6: obtenerAlertas
  * Obtiene todas las encuestas con alerta_activa = true.
  * Usa 3 consultas separadas y une en JavaScript.
  */
 const obtenerAlertas = async (req, res) => {
+  const { fechaDesde: fechaDesdeQuery, fechaHasta: fechaHastaQuery } = req.query;
+
+  const fechaHastaBase = fechaHastaQuery
+    ? new Date(`${fechaHastaQuery}T00:00:00.000Z`)
+    : new Date();
+  const fechaDesdeBase = fechaDesdeQuery
+    ? new Date(`${fechaDesdeQuery}T00:00:00.000Z`)
+    : new Date(fechaHastaBase);
+
+  if (!fechaDesdeQuery) {
+    fechaDesdeBase.setUTCDate(fechaDesdeBase.getUTCDate() - 29);
+  }
+
+  if (!esFechaValida(fechaDesdeBase) || !esFechaValida(fechaHastaBase)) {
+    return res.status(400).json({
+      success: false,
+      message: 'Las fechas deben tener formato YYYY-MM-DD'
+    });
+  }
+
+  if (fechaDesdeBase > fechaHastaBase) {
+    return res.status(400).json({
+      success: false,
+      message: 'fechaDesde no puede ser mayor que fechaHasta'
+    });
+  }
+
   try {
+    const { fechaDesde, fechaHasta } = construirFiltroFechas(
+      fechaDesdeBase.toISOString().slice(0, 10),
+      fechaHastaBase.toISOString().slice(0, 10)
+    );
+
     // a) Feedbacks con alerta activa (sin pedir folio ni cliente, no existen aqui)
     const { data: feedbacks, error: errorFeedbacks } = await supabase
       .from('feedback_clientes')
       .select('id, servicio_id, respondido_at, respuestas, alerta_activa, nota_resolucion')
       .eq('alerta_activa', true)
+      .not('respondido_at', 'is', null)
+      .gte('respondido_at', fechaDesde)
+      .lte('respondido_at', fechaHasta)
       .order('respondido_at', { ascending: false });
 
     if (errorFeedbacks) throw errorFeedbacks;
@@ -302,7 +487,7 @@ const obtenerAlertas = async (req, res) => {
 };
 
 /**
- * FUNCION 6: guardarNotaResolucion
+ * FUNCION 7: guardarNotaResolucion
  * Guarda o actualiza la nota de resolucion de una alerta.
  */
 const guardarNotaResolucion = async (req, res) => {
@@ -331,6 +516,7 @@ module.exports = {
   obtenerResumen,
   obtenerPorTecnico,
   obtenerTendencia,
+  getDistribucion,
   obtenerDetalleTecnico,
   obtenerAlertas,
   guardarNotaResolucion

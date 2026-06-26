@@ -11,6 +11,7 @@ router.use(authMiddleware);
 router.get('/', reportesController.obtenerResumen);
 router.get('/por-tecnico', reportesController.obtenerPorTecnico);
 router.get('/tendencia', reportesController.obtenerTendencia);
+router.get('/distribucion', reportesController.getDistribucion);
 router.get('/tecnico/:tecnico_id', reportesController.obtenerDetalleTecnico);
 router.get('/alertas', reportesController.obtenerAlertas);
 router.put('/alertas/:feedback_id', reportesController.guardarNotaResolucion);
