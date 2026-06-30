@@ -118,21 +118,33 @@ const obtenerPorTecnico = async (req, res) => {
   try {
     const { fechaDesde, fechaHasta } = construirFiltroFechas(desde, hasta);
 
-    // a) Todos los feedbacks del periodo
-    const { data: feedbacks, error: errorFeedback } = await supabase
-      .from('feedback_clientes')
-      .select('respuestas, servicio_id, respondido_at')
-      .gte('respondido_at', fechaDesde)
-      .lte('respondido_at', fechaHasta);
-
-    if (errorFeedback) throw errorFeedback;
-
-    // b) Todos los servicios (para obtener tecnico_id)
-    const { data: servicios, error: errorServicios } = await supabase
+    // a) Servicios creados en el periodo (fuente de verdad para el rango de fechas)
+    const { data: serviciosPeriodo, error: errorServicios } = await supabase
       .from('servicios')
-      .select('id, tecnico_id');
+      .select('id, tecnico_id')
+      .gte('created_at', fechaDesde)
+      .lte('created_at', fechaHasta);
 
     if (errorServicios) throw errorServicios;
+
+    const servicios = serviciosPeriodo || [];
+    if (servicios.length === 0) {
+      return res.status(200).json({ success: true, data: [] });
+    }
+
+    const serviciosIds = servicios.map(s => s.id);
+    const serviciosPorId = servicios.reduce((acc, s) => {
+      acc[s.id] = s;
+      return acc;
+    }, {});
+
+    // b) Feedbacks de esos servicios (sin filtro de fecha en feedback)
+    const { data: feedbacks, error: errorFeedback } = await supabase
+      .from('feedback_clientes')
+      .select('respuestas, servicio_id')
+      .in('servicio_id', serviciosIds);
+
+    if (errorFeedback) throw errorFeedback;
 
     // c) Todos los empleados
     const { data: empleados, error: errorEmpleados } = await supabase
@@ -145,7 +157,7 @@ const obtenerPorTecnico = async (req, res) => {
     const grupos = {};
 
     (feedbacks || []).forEach(f => {
-      const servicio = (servicios || []).find(s => s.id === f.servicio_id);
+      const servicio = serviciosPorId[f.servicio_id];
       if (!servicio) return;
 
       const tid = servicio.tecnico_id;
@@ -364,7 +376,10 @@ const getDistribucion = async (req, res) => {
  */
 const obtenerDetalleTecnico = async (req, res) => {
   const { tecnico_id } = req.params;
+  const { desde, hasta } = req.query;
   try {
+    const { fechaDesde, fechaHasta } = construirFiltroFechas(desde, hasta);
+
     const { data, error } = await supabase
       .from('feedback_clientes')
       .select(`
@@ -376,10 +391,13 @@ const obtenerDetalleTecnico = async (req, res) => {
         servicios!inner (
           folio,
           cliente,
-          tecnico_id
+          tecnico_id,
+          created_at
         )
       `)
-      .eq('servicios.tecnico_id', tecnico_id);
+      .eq('servicios.tecnico_id', tecnico_id)
+      .gte('servicios.created_at', fechaDesde)
+      .lte('servicios.created_at', fechaHasta);
 
     if (error) throw error;
 
@@ -401,11 +419,19 @@ const obtenerDetalleTecnico = async (req, res) => {
 
 /**
  * FUNCION 6: obtenerAlertas
- * Obtiene todas las encuestas con alerta_activa = true.
- * Usa 3 consultas separadas y une en JavaScript.
+ * Obtiene todas las encuestas con alerta (activas y resueltas) del periodo.
+ * Usa consultas separadas y une en JavaScript.
  */
 const obtenerAlertas = async (req, res) => {
-  const { fechaDesde: fechaDesdeQuery, fechaHasta: fechaHastaQuery } = req.query;
+  const {
+    fechaDesde: fechaDesdeQueryRaw,
+    fechaHasta: fechaHastaQueryRaw,
+    desde,
+    hasta
+  } = req.query;
+
+  const fechaDesdeQuery = fechaDesdeQueryRaw || desde;
+  const fechaHastaQuery = fechaHastaQueryRaw || hasta;
 
   const fechaHastaBase = fechaHastaQuery
     ? new Date(`${fechaHastaQuery}T00:00:00.000Z`)
@@ -438,26 +464,39 @@ const obtenerAlertas = async (req, res) => {
       fechaHastaBase.toISOString().slice(0, 10)
     );
 
-    // a) Feedbacks con alerta activa (sin pedir folio ni cliente, no existen aqui)
+    // a) Servicios creados en el periodo (fuente de verdad para el rango de fechas)
+    const { data: serviciosPeriodo, error: errorServiciosPeriodo } = await supabase
+      .from('servicios')
+      .select('id')
+      .gte('created_at', fechaDesde)
+      .lte('created_at', fechaHasta);
+
+    if (errorServiciosPeriodo) throw errorServiciosPeriodo;
+
+    const serviciosIds = (serviciosPeriodo || []).map(s => s.id);
+    if (serviciosIds.length === 0) {
+      return res.status(200).json({ success: true, data: [] });
+    }
+
+    // b) Feedbacks de esos servicios (activas y resueltas)
     const { data: feedbacks, error: errorFeedbacks } = await supabase
       .from('feedback_clientes')
       .select('id, servicio_id, respondido_at, respuestas, alerta_activa, nota_resolucion')
-      .eq('alerta_activa', true)
+      .in('servicio_id', serviciosIds)
       .not('respondido_at', 'is', null)
-      .gte('respondido_at', fechaDesde)
-      .lte('respondido_at', fechaHasta)
+      .or('alerta_activa.eq.true,and(alerta_activa.eq.false,nota_resolucion.not.is.null,nota_resolucion.neq.)')
       .order('respondido_at', { ascending: false });
 
     if (errorFeedbacks) throw errorFeedbacks;
 
-    // b) Servicios para obtener folio, cliente y tecnico_id
+    // c) Servicios para obtener folio, cliente y tecnico_id
     const { data: servicios, error: errorServicios } = await supabase
       .from('servicios')
       .select('id, folio, cliente, tecnico_id');
 
     if (errorServicios) throw errorServicios;
 
-    // c) Empleados para obtener nombre del tecnico
+    // d) Empleados para obtener nombre del tecnico
     const { data: empleados, error: errorEmpleados } = await supabase
       .from('empleados')
       .select('id, nombre');
