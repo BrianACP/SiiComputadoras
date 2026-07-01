@@ -10,6 +10,8 @@ const empleadoRoutes = require('./routes/empleadoRoutes');
 const servicioRoutes = require('./routes/servicioRoutes');
 const configuracionRoutes = require('./routes/configuracionRoutes');
 const reportesRoutes = require('./routes/reportesRoutes');
+const encuestaEmpleadoRoutes = require('./routes/encuestaEmpleadoRoutes');
+const climaLaboralRoutes = require('./routes/climaLaboralRoutes');
 
 const app = express();
 
@@ -33,6 +35,8 @@ app.use('/api/empleados', empleadoRoutes);
 app.use('/api/servicios', servicioRoutes);
 app.use('/api/configuracion', configuracionRoutes);
 app.use('/api/reportes', reportesRoutes);
+app.use('/api/encuesta-empleado', encuestaEmpleadoRoutes);
+app.use('/api/clima-laboral', climaLaboralRoutes);
 
 module.exports = app;
 
